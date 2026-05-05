@@ -1,0 +1,280 @@
+from collections.abc import Iterable
+
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+from configuration.BaseResponse import base_res
+
+BLOCKED_HEADERS = frozenset(
+    {"x-forwarded-for", "x-real-ip", "forwarded"}
+)
+
+# Incoming header names besides ALWAYS_ALLOWED_HEADERS must appear in EXTRA_ALLOWED_HEADERS.
+ALWAYS_ALLOWED_HEADERS = frozenset({
+    "host",
+    "connection",
+    "content-length",
+    "content-type",
+    "accept",
+    "accept-encoding",
+    "accept-language",
+    "user-agent",
+    "cookie",
+    "authorization",
+    "origin",
+    "referer",
+    "pragma",
+    "cache-control",
+    "upgrade-insecure-requests",
+    "sec-fetch-site",
+    "sec-fetch-mode",
+    "sec-fetch-dest",
+    "sec-fetch-user",
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "prefer",
+})
+
+# Extend allowlist beyond ALWAYS_ALLOWED_HEADERS (app / client custom headers).
+EXTRA_ALLOWED_HEADERS = frozenset(
+    {
+        "x-requested-with",
+        "x-csrf-token",
+        "accept-datetime",
+        "x-api-key",
+        "idempotency-key",
+        "x-custom-header",
+    }
+)
+
+# Presence required (lowercase names). OPTIONS stays exempt via exempt_methods_for_allow_required.
+REQUIRED_HEADERS: frozenset[str] = frozenset({"content-type", "x-api-key"})
+
+REQUIRED_HEADERS_METHODS: frozenset[str] | None = frozenset(
+    {"POST", "PUT", "PATCH", "DELETE"}
+)
+
+
+ALLOWED_CONTENT_TYPE_MEDIA_TYPES: frozenset[str] = frozenset({"application/json"})
+# Maximum ``application/json`` request body size (3 MiB).
+MAX_APPLICATION_JSON_BODY_BYTES = 3 * 1024 * 1024
+
+
+async def discard_entire_request_body(receive: Receive) -> None:
+    """Drain an HTTP body so the connection stays healthy after an early rejection."""
+    while True:
+        message = await receive()
+        mt = message["type"]
+        if mt == "http.disconnect":
+            return
+        if mt == "http.request" and not message.get("more_body"):
+            return
+
+
+async def read_http_body_under_cap(
+    receive: Receive,
+    limit: int,
+) -> tuple[bytes | None, bool]:
+    """Read request body; ``(None, True)`` means it exceeded ``limit``."""
+
+    buf = bytearray()
+    while True:
+        message = await receive()
+        mt = message["type"]
+        if mt == "http.disconnect":
+            return (bytes(buf), False) if buf else (b"", False)
+        if mt != "http.request":
+            continue
+
+        chunk = message.get("body") or b""
+        buf.extend(chunk)
+        more_body = message.get("more_body", False)
+
+        if len(buf) > limit:
+            await _drain_remainder(receive, more_body)
+            return None, True
+
+        if not more_body:
+            return bytes(buf), False
+
+
+async def _drain_remainder(receive: Receive, more_body: bool) -> None:
+    while more_body:
+        message = await receive()
+        mt = message["type"]
+        if mt == "http.disconnect":
+            return
+        if mt != "http.request":
+            continue
+        more_body = message.get("more_body", False)
+
+
+def _replay_receive_with_body(full_body: bytes) -> Receive:
+    sent = False
+
+    async def receive() -> dict:
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": bytes(full_body), "more_body": False}
+        return {"type": "http.disconnect"}
+
+    return receive
+
+
+def _primary_media_type(content_type_raw: str) -> str:
+    return content_type_raw.split(";", maxsplit=1)[0].strip().lower()
+
+
+def _header_first_values(scope: Scope) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in scope.get("headers") or ():
+        if isinstance(key, bytes):
+            k = key.decode("latin1").strip().lower()
+        else:
+            k = str(key).strip().lower()
+        if k in out:
+            continue
+        if isinstance(value, bytes):
+            v = value.decode("latin1").strip()
+        else:
+            v = str(value).strip()
+        out[k] = v
+    return out
+
+
+def _header_names(scope: Scope) -> set[str]:
+    raw = scope.get("headers") or ()
+    names: set[str] = set()
+    for key, _value in raw:
+        if isinstance(key, bytes):
+            names.add(key.decode("latin1").strip().lower())
+        else:
+            names.add(str(key).strip().lower())
+    return names
+
+
+class InboundHeaderPolicyMiddleware:
+    """Blocked / required / allowed policy for inbound request headers (not CORS)."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        blocked: frozenset[str] | set[str],
+        extra_allowed: frozenset[str] | set[str],
+        required: frozenset[str] | set[str],
+        required_methods: frozenset[str] | set[str] | None,
+        exempt_methods_for_allow_required: Iterable[str],
+    ) -> None:
+        self.app = app
+        self.blocked = frozenset(h.lower().strip() for h in blocked)
+        self.required = frozenset(h.lower().strip() for h in required)
+        self.required_methods = (
+            frozenset(m.upper() for m in required_methods)
+            if required_methods is not None
+            else None
+        )
+        self.allowlist_allow = ALWAYS_ALLOWED_HEADERS | frozenset(
+            h.lower().strip() for h in extra_allowed
+        )
+        self.exempt_allow_required = frozenset(
+            m.upper() for m in exempt_methods_for_allow_required
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method") or ""
+        incoming = _header_names(scope)
+
+        banned_present = incoming & self.blocked
+        if banned_present:
+            resp = base_res(
+                403,
+                "Blocked header present",
+                {"headers": sorted(banned_present)},
+                False,
+            )
+            await resp(scope, receive, send)
+            return
+
+        enforce_allow_required = method not in self.exempt_allow_required
+
+        if enforce_allow_required:
+            meth = method.upper()
+            applies_required = (
+                self.required_methods is None or meth in self.required_methods
+            )
+            req_set = self.required if applies_required else frozenset()
+            missing = sorted(req_set - incoming)
+            if missing:
+                resp = base_res(
+                    400,
+                    "Missing required headers",
+                    {"missing": missing},
+                    False,
+                )
+                await resp(scope, receive, send)
+                return
+
+            hdr_values = _header_first_values(scope)
+            ct_raw = hdr_values.get("content-type")
+            media = ""
+            if ct_raw:
+                media = _primary_media_type(ct_raw)
+                if media not in ALLOWED_CONTENT_TYPE_MEDIA_TYPES:
+                    resp = base_res(
+                        415,
+                        "Content-Type must be application/json",
+                        {"content_type": ct_raw, "media_type": media},
+                        False,
+                    )
+                    await resp(scope, receive, send)
+                    return
+
+            if media == "application/json":
+                cl_raw = hdr_values.get("content-length")
+                if cl_raw is not None:
+                    try:
+                        cl_n = int(cl_raw.strip())
+                    except ValueError:
+                        pass
+                    else:
+                        if cl_n > MAX_APPLICATION_JSON_BODY_BYTES:
+                            resp = base_res(
+                                413,
+                                "Request body exceeds maximum allowed size",
+                                {
+                                    "max_bytes": MAX_APPLICATION_JSON_BODY_BYTES,
+                                    "content_length": cl_n,
+                                },
+                                False,
+                            )
+                            await resp(scope, receive, send)
+                            await discard_entire_request_body(receive)
+                            return
+
+                body, too_large = await read_http_body_under_cap(
+                    receive, MAX_APPLICATION_JSON_BODY_BYTES
+                )
+                if too_large:
+                    resp = base_res(
+                        413,
+                        "Request body exceeds maximum allowed size",
+                        {"max_bytes": MAX_APPLICATION_JSON_BODY_BYTES},
+                        False,
+                    )
+                    await resp(scope, receive, send)
+                    return
+                receive = _replay_receive_with_body(body if body is not None else b"")
+
+            # disallowed = sorted(incoming - self.allowlist_allow)
+            # if disallowed:
+            #     resp = base_res(400,"Header not allowed",{"headers": sorted(disallowed)},False )
+            #     await resp(scope, receive, send)
+            #     return
+
+        await self.app(scope, receive, send)

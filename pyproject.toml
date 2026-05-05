@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "fastapi-boilerplat"
+version = "0.1.0"
+description = ""
+authors = ["maksood <maksood.aalam@devkraft.in>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "3.14.4"
+fastapi = "^0.136.1"
+pydantic = "^2.13.3"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
