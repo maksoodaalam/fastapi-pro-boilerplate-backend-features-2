@@ -28,7 +28,7 @@ _DateTimeUTC = datetime.now(timezone.utc)
 
 try:
     logger = get_file_logger(f"{_DateTimeUTC.strftime('%d_%m_%Y_%H_%M')}_Initialize.log")
-    logger.info("Initializing FastAPI app")
+    # logger.info("Initializing FastAPI app")
     print("Initializing FastAPI app")
 except Exception:
     print("Something went wrong while logging.")
