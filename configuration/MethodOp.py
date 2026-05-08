@@ -1,13 +1,12 @@
 from collections.abc import Sequence
 
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette. types import ASGIApp, Receive, Scope, Send
+
 
 from configuration.BaseResponse import base_res
 
 
-def normalize_allowed_http_methods(
-    allowed_methods: Sequence[str],
-) -> tuple[frozenset[str], str]:
+def normalize_allowed_http_methods(allowed_methods: Sequence[str]) -> tuple[frozenset[str], str]:
     frozen = frozenset(m.upper() for m in allowed_methods)
     return frozen, ", ".join(sorted(frozen))
 

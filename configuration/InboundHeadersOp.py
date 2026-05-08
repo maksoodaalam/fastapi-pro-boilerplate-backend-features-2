@@ -56,70 +56,6 @@ REQUIRED_HEADERS_METHODS: frozenset[str] | None = frozenset(
 
 
 ALLOWED_CONTENT_TYPE_MEDIA_TYPES: frozenset[str] = frozenset({"application/json"})
-# Maximum ``application/json`` request body size (3 MiB).
-MAX_APPLICATION_JSON_BODY_BYTES = 3 * 1024 * 1024
-
-
-async def discard_entire_request_body(receive: Receive) -> None:
-    """Drain an HTTP body so the connection stays healthy after an early rejection."""
-    while True:
-        message = await receive()
-        mt = message["type"]
-        if mt == "http.disconnect":
-            return
-        if mt == "http.request" and not message.get("more_body"):
-            return
-
-
-async def read_http_body_under_cap(
-    receive: Receive,
-    limit: int,
-) -> tuple[bytes | None, bool]:
-    """Read request body; ``(None, True)`` means it exceeded ``limit``."""
-
-    buf = bytearray()
-    while True:
-        message = await receive()
-        mt = message["type"]
-        if mt == "http.disconnect":
-            return (bytes(buf), False) if buf else (b"", False)
-        if mt != "http.request":
-            continue
-
-        chunk = message.get("body") or b""
-        buf.extend(chunk)
-        more_body = message.get("more_body", False)
-
-        if len(buf) > limit:
-            await _drain_remainder(receive, more_body)
-            return None, True
-
-        if not more_body:
-            return bytes(buf), False
-
-
-async def _drain_remainder(receive: Receive, more_body: bool) -> None:
-    while more_body:
-        message = await receive()
-        mt = message["type"]
-        if mt == "http.disconnect":
-            return
-        if mt != "http.request":
-            continue
-        more_body = message.get("more_body", False)
-
-
-def _replay_receive_with_body(full_body: bytes) -> Receive:
-    sent = False
-
-    async def receive() -> dict:
-        nonlocal sent
-        if not sent:
-            sent = True
-            return {"type": "http.request", "body": bytes(full_body), "more_body": False}
-        return {"type": "http.disconnect"}
-
-    return receive
 
 
 def _primary_media_type(content_type_raw: str) -> str:
@@ -234,42 +170,6 @@ class InboundHeaderPolicyMiddleware:
                     )
                     await resp(scope, receive, send)
                     return
-
-            if media == "application/json":
-                cl_raw = hdr_values.get("content-length")
-                if cl_raw is not None:
-                    try:
-                        cl_n = int(cl_raw.strip())
-                    except ValueError:
-                        pass
-                    else:
-                        if cl_n > MAX_APPLICATION_JSON_BODY_BYTES:
-                            resp = base_res(
-                                413,
-                                "Request body exceeds maximum allowed size",
-                                {
-                                    "max_bytes": MAX_APPLICATION_JSON_BODY_BYTES,
-                                    "content_length": cl_n,
-                                },
-                                False,
-                            )
-                            await resp(scope, receive, send)
-                            await discard_entire_request_body(receive)
-                            return
-
-                body, too_large = await read_http_body_under_cap(
-                    receive, MAX_APPLICATION_JSON_BODY_BYTES
-                )
-                if too_large:
-                    resp = base_res(
-                        413,
-                        "Request body exceeds maximum allowed size",
-                        {"max_bytes": MAX_APPLICATION_JSON_BODY_BYTES},
-                        False,
-                    )
-                    await resp(scope, receive, send)
-                    return
-                receive = _replay_receive_with_body(body if body is not None else b"")
 
             # disallowed = sorted(incoming - self.allowlist_allow)
             # if disallowed:

@@ -1,9 +1,11 @@
-from fastapi import FastAPI, Request
+import sys
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from html import escape
+from datetime import datetime, timezone
 
 from configuration.BaseResponse import base_res
 from configuration.CorsOp import cors_config, allowed_methods
-from configuration.OutboundHeadersOp import header_config
 from configuration.InboundHeadersOp import (
     BLOCKED_HEADERS,
     EXTRA_ALLOWED_HEADERS,
@@ -12,9 +14,28 @@ from configuration.InboundHeadersOp import (
     InboundHeaderPolicyMiddleware,
 )
 from configuration.MethodOp import HttpMethodAllowlistMiddleware
+from configuration.PayloadSizeValidator import LimitStreamingMiddleware
+from configuration.OutboundHeadersOp import outbound_header_middleware
+from configuration.PollutionValidator import validate_pollution
+from configuration.GlobalOverloadMiddleware import global_overload_http_middleware
+from configuration.RateLimitMiddleware import rate_limit_http_middleware
+from configuration.logger_conf import get_file_logger
+from configuration.redis_op import get_redis_client
+from configuration.config import global_settings
+
+
+_DateTimeUTC = datetime.now(timezone.utc)
+
+try:
+    logger = get_file_logger(f"{_DateTimeUTC.strftime('%d_%m_%Y_%H_%M')}_Initialize.log")
+    logger.info("Initializing FastAPI app")
+    print("Initializing FastAPI app")
+except Exception:
+    print("Something went wrong while logging.")
+    raise sys.exit("Something went wrong while logging.")
 
 app = FastAPI(
-    title="DocSprint",
+    title=global_settings.app_name,
     description="A backend service that provides high-performance document and image processing utilities via APIs, with support for async jobs, streaming, and scalable workflows.",
     version="1.0.0",
     contact={
@@ -44,10 +65,29 @@ app = FastAPI(
 
 )
 
-# Method Controls
+# Redis Connection.
+redis_client = get_redis_client()
+try:
+    redis_client.ping()
+    logger.info("Redis connection established")
+except Exception as e:
+    logger.error(f"Redis connection failed: {e}")
+    raise sys.exit("Redis Connection Failed.") from e
+
+
+# Per-client, per-route sliding window (see RATE_LIMIT_MAX_REQUESTS / RATE_LIMIT_WINDOW)
+app.middleware("http")(
+    rate_limit_http_middleware(
+        redis_client=redis_client,
+        max_requests=global_settings.rate_limit_max_requests,
+        window_seconds=global_settings.rate_limit_window_seconds,
+    )
+)
+
+# Incoming Method Controls
 app.add_middleware(HttpMethodAllowlistMiddleware, allowed_methods=allowed_methods)
 
-# Header Controls
+# Incoming Header Controls
 app.add_middleware(
     InboundHeaderPolicyMiddleware,
     blocked=BLOCKED_HEADERS,
@@ -60,14 +100,27 @@ app.add_middleware(
 # Cors Controls
 app.add_middleware(CORSMiddleware, **cors_config)
 
+# Incoming JSON/text body size (streaming receive)
+app.add_middleware(LimitStreamingMiddleware)
 
+# Pollution validation
+app.middleware("http")(validate_pollution)
 
+# Outgoing header control
+app.middleware("http")(outbound_header_middleware)
 
-@app.middleware("http")
-async def add_headers(request: Request, call_next):
-    response = await call_next(request)
-    response = header_config(response)
-    return response
+# Global cap: when total service traffic exceeds threshold in the window, all APIs
+# return overload until the sliding window cools (registered last = outermost).
+app.middleware("http")(
+    global_overload_http_middleware(
+        redis_client=redis_client,
+        max_requests=global_settings.global_overload_max_requests,
+        window_seconds=global_settings.global_overload_window_seconds,
+        message=global_settings.global_overload_message,
+    )
+)
+
+logger.info("Middleware added")
 
 
 @app.get("/api/v1/health", tags=["Health"])
@@ -83,6 +136,15 @@ def put_check():
 @app.trace("/api/v1/trace", tags=["Docs"])
 def docs():
     return base_res(200, "Working", {}, True)
+
+
+@app.get("/api/v1/xss-sample")
+def home(name: str):
+    safe_name = escape(name)
+    return f"<h1>Hello {safe_name}</h1>"
+
+
+
 
 # uvicorn.run(app, host="0.0.0.0", port=8000)
 
