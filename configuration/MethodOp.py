@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 
-from starlette. types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 
 from configuration.BaseResponse import base_res

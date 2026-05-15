@@ -1,8 +1,10 @@
 import sys
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from html import escape
 from datetime import datetime, timezone
+from sqlalchemy import text
 
 from configuration.BaseResponse import base_res
 from configuration.CorsOp import cors_config, allowed_methods
@@ -11,7 +13,7 @@ from configuration.InboundHeadersOp import (
     EXTRA_ALLOWED_HEADERS,
     REQUIRED_HEADERS,
     REQUIRED_HEADERS_METHODS,
-    InboundHeaderPolicyMiddleware,
+    inbound_header_policy_middleware,
 )
 from configuration.MethodOp import HttpMethodAllowlistMiddleware
 from configuration.PayloadSizeValidator import LimitStreamingMiddleware
@@ -21,6 +23,7 @@ from configuration.GlobalOverloadMiddleware import global_overload_http_middlewa
 from configuration.RateLimitMiddleware import rate_limit_http_middleware
 from configuration.logger_conf import get_file_logger
 from configuration.redis_op import get_redis_client
+from configuration.db_op import get_engine
 from configuration.config import global_settings
 
 
@@ -72,8 +75,16 @@ try:
     logger.info("Redis connection established")
 except Exception as e:
     logger.error(f"Redis connection failed: {e}")
-    raise sys.exit("Redis Connection Failed.") from e
+    raise sys.exit("Redis Connection Failed.")
 
+# PostgreSQL (Docker Compose / DBeaver — tune DB_HOST & DB_PORT in env).
+try:
+    with get_engine().connect() as conn:
+        conn.execute(text("SELECT 1"))
+    logger.info("PostgreSQL connection established")
+except Exception as e:
+    logger.error(f"PostgreSQL connection failed: {e}")
+    raise sys.exit("PostgreSQL Connection Failed.")
 
 # Per-client, per-route sliding window (see RATE_LIMIT_MAX_REQUESTS / RATE_LIMIT_WINDOW)
 app.middleware("http")(
@@ -89,7 +100,7 @@ app.add_middleware(HttpMethodAllowlistMiddleware, allowed_methods=allowed_method
 
 # Incoming Header Controls
 app.add_middleware(
-    InboundHeaderPolicyMiddleware,
+    inbound_header_policy_middleware,
     blocked=BLOCKED_HEADERS,
     extra_allowed=EXTRA_ALLOWED_HEADERS,
     required=REQUIRED_HEADERS,
@@ -120,7 +131,12 @@ app.middleware("http")(
     )
 )
 
+
+
+
 logger.info("Middleware added")
+
+
 
 
 @app.get("/api/v1/health", tags=["Health"])
@@ -144,8 +160,5 @@ def home(name: str):
     return f"<h1>Hello {safe_name}</h1>"
 
 
-
-
-# uvicorn.run(app, host="0.0.0.0", port=8000)
 
 

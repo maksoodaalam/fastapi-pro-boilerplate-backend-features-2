@@ -1,0 +1,14 @@
+.git
+.gitignore
+__pycache__
+**/__pycache__
+*.py[cod]
+*.egg-info
+.venv
+venv
+.env
+.env.*
+!.env.docker.example
+logs/*.log
+*.md
+.docker

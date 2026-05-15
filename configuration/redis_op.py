@@ -13,10 +13,13 @@ import redis
 from redis.connection import ConnectionPool
 from redis.exceptions import RedisError
 
+from configuration.config import global_settings
+
+
 # Matches a typical local `redis-server` install.
-_DEFAULT_REDIS_HOST = "127.0.0.1"
-_DEFAULT_REDIS_PORT = 6379
-_DEFAULT_REDIS_DB = 0
+_DEFAULT_REDIS_HOST = global_settings.redis_host
+_DEFAULT_REDIS_PORT = global_settings.redis_port
+_DEFAULT_REDIS_DB = global_settings.redis_db
 
 
 class RedisConnectionConfig(BaseModel):
@@ -28,27 +31,34 @@ class RedisConnectionConfig(BaseModel):
     host: str = _DEFAULT_REDIS_HOST
     port: int = _DEFAULT_REDIS_PORT
     db: int = _DEFAULT_REDIS_DB
-    password: Optional[str] = None
+    username: Optional[str] = global_settings.redis_user
+    password: Optional[str] = global_settings.redis_password
 
     # When set, used with ConnectionPool.from_url() instead of host/port/db/ssl below.
-    url: Optional[str] = None
+    # url: Optional[str] = None
+    url: Optional[str] = global_settings.redis_url
 
-    ssl: bool = False
+    # ssl: bool = False
+    ssl: bool = global_settings.redis_ssl
 
     # Upper bound on connections in the pool (per process).
-    max_connections: int = 50
+    max_connections: int = global_settings.redis_max_connections
 
     # Max time to wait for a response on the socket; None = no socket read timeout.
-    socket_timeout: Optional[float] = None
+    # socket_timeout: Optional[float] = None
+    socket_timeout: Optional[float] = global_settings.redis_socket_timeout
 
     # Max time to establish the TCP connection.
-    socket_connect_timeout: float = 5.0
+    # socket_connect_timeout: float = 5.0
+    socket_connect_timeout: float = global_settings.redis_socket_connect_timeout
 
     # Seconds between health checks on idle connections; 0 disables (redis-py 4+).
-    health_check_interval: int = 30
+    # health_check_interval: int = 30
+    health_check_interval: int = global_settings.redis_health_check_interval
 
     # If True, string payloads come back as str instead of bytes.
-    decode_responses: bool = True
+    # decode_responses: bool = True
+    decode_responses: bool = global_settings.redis_decode_responses
 
     model_config = {"frozen": True}
 
@@ -61,6 +71,7 @@ def build_redis_pool(config: RedisConnectionConfig) -> ConnectionPool:
     and returns it automatically.
     """
     common_kwargs = dict(
+        username=config.username,
         password=config.password,
         max_connections=config.max_connections,
         socket_timeout=config.socket_timeout,

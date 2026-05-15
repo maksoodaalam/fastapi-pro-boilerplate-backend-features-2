@@ -178,3 +178,23 @@ class InboundHeaderPolicyMiddleware:
             #     return
 
         await self.app(scope, receive, send)
+
+
+def inbound_header_policy_middleware(
+    app: ASGIApp,
+    /,
+    *,
+    blocked: frozenset[str] | set[str],
+    extra_allowed: frozenset[str] | set[str],
+    required: frozenset[str] | set[str],
+    required_methods: frozenset[str] | set[str] | None,
+    exempt_methods_for_allow_required: Iterable[str],
+) -> ASGIApp:
+    return InboundHeaderPolicyMiddleware(
+        app,
+        blocked=blocked,
+        extra_allowed=extra_allowed,
+        required=required,
+        required_methods=required_methods,
+        exempt_methods_for_allow_required=exempt_methods_for_allow_required,
+    )
